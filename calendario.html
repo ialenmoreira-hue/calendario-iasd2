@@ -133,6 +133,27 @@
       transform: scale(1.02);
     }
 
+    .sync-status {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      z-index: 100;
+      backdrop-filter: blur(4px);
+    }
+
+    .sync-status.online {
+      background: rgba(29, 124, 62, 0.8);
+    }
+
+    .sync-status.offline {
+      background: rgba(192, 57, 43, 0.8);
+    }
+
     .week-header {
       display: grid;
       grid-template-columns: repeat(7, 1fr);
@@ -270,6 +291,8 @@
       transition: transform 0.2s ease;
       background: #f9fcff;
       border: 1px solid rgba(255,255,255,0.3);
+      max-height: 90vh;
+      overflow-y: auto;
     }
 
     .modal-overlay.active .modal {
@@ -362,13 +385,14 @@
       .modal { padding: 1.5rem; }
       .scale-table td { padding: 6px 4px; font-size: 0.8rem; }
       .week-header { font-size: 0.6rem; }
+      .sync-status { font-size: 0.6rem; padding: 4px 10px; top: 10px; right: 10px; }
     }
   </style>
 </head>
 <body>
 <div class="app-container">
   <h1>
-    <span>📆 Calendário &  Escala -​ IASD Bom Jesus</span>
+    <span>📆 Calendário & Escala - IASD Bom Jesus</span>
     <span class="month-year-badge" id="monthYearDisplay">Junho 2026</span>
   </h1>
 
@@ -379,7 +403,7 @@
     </div>
     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
       <button class="today-btn" id="goTodayBtn">🗓 Hoje</button>
-      
+      <a href="index.html" class="edit-link-btn">✏️ Editar Escala</a>
     </div>
   </div>
 
@@ -391,9 +415,12 @@
   <div class="calendar-grid" id="calendarGrid"></div>
   <div class="footer-note">
     <span>👆 Clique em qualquer dia para ver a escala</span>
-    <span>📋 Dados salvos automaticamente</span>
+    <span>📋 Dados sincronizados em nuvem</span>
   </div>
 </div>
+
+<!-- Sync Status -->
+<div class="sync-status" id="syncStatus">🔄 Sincronizando...</div>
 
 <!-- Modal -->
 <div class="modal-overlay" id="modalOverlay">
@@ -410,36 +437,56 @@
 
 <script>
   (function() {
-    // --- Chave para localStorage ---
-    const STORAGE_KEY = 'escala_ministerial_data';
+    // --- CONFIGURAÇÃO JSONBIN.IO ---
+    // IMPORTANTE: Use os MESMOS dados que no index.html
+    const JSONBIN_BIN_ID = 'SEU_BIN_ID_AQUI';
+    const JSONBIN_API_KEY = 'SUA_API_KEY_AQUI';
+    const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`;
 
     // --- Funções de persistência ---
-    function loadScaleData() {
+    async function loadScaleData() {
       try {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (stored) {
-          return JSON.parse(stored);
+        updateSyncStatus('loading');
+        const response = await fetch(`${JSONBIN_URL}/latest`, {
+          headers: {
+            'X-Master-Key': JSONBIN_API_KEY
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          updateSyncStatus('online');
+          // Salva cache local
+          try {
+            localStorage.setItem('escala_cache', JSON.stringify(data.record));
+          } catch (e) {}
+          return data.record || {};
+        } else if (response.status === 404) {
+          updateSyncStatus('online');
+          return {};
+        } else {
+          throw new Error('Erro ao carregar dados');
         }
       } catch (e) {
         console.error('Erro ao carregar dados:', e);
+        updateSyncStatus('offline');
+        
+        // Tenta carregar do cache local
+        const cached = localStorage.getItem('escala_cache');
+        if (cached) {
+          try {
+            return JSON.parse(cached);
+          } catch (e) {}
+        }
+        
+        // Fallback para dados de exemplo
+        return generateExampleDataObject();
       }
-      return null;
     }
 
-    function saveScaleData(data) {
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-      } catch (e) {
-        console.error('Erro ao salvar dados:', e);
-      }
-    }
-
-    // --- DADOS DE ESCALA ---
-    let scaleData = loadScaleData();
-
-    // Se não houver dados salvos, gera os dados de exemplo
-    if (!scaleData || Object.keys(scaleData).length === 0) {
-      scaleData = {};
+    // --- Função para gerar dados de exemplo ---
+    function generateExampleDataObject() {
+      const data = {};
       const now = new Date();
       const year = now.getFullYear();
       const month = now.getMonth();
@@ -448,7 +495,15 @@
         return `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
       }
 
-      const sábados = [5, 12, 19, 26];
+      // Encontra os sábados do mês
+      const sábados = [];
+      for (let d = 1; d <= 31; d++) {
+        const date = new Date(year, month, d);
+        if (date.getDay() === 6) {
+          sábados.push(d);
+        }
+      }
+
       const pregadores = ['Pr. Carlos Silva', 'Pr. Ana Lúcia', 'Pr. Roberto Mendes', 'Pr. Fernanda Costa'];
       const recepcao = ['Marcos e Lúcia', 'João e Marta', 'André e Paula', 'Sandra e Cláudio'];
       const diaconos = ['Diác. Ronaldo', 'Diác. Beatriz', 'Diác. Maurício', 'Diác. Elaine'];
@@ -457,7 +512,7 @@
 
       sábados.forEach((day, idx) => {
         const key = dateKey(year, month, day);
-        scaleData[key] = {
+        data[key] = {
           data: `${day}/${month+1}/${year}`,
           canticos: `Cânticos: Hinário 234, 567`,
           sonoplastia: `Sonoplastia: Equipe Áudio (Carlos)`,
@@ -469,33 +524,53 @@
         };
       });
 
-      const domingos = [1, 8, 15, 22, 29];
+      // Adiciona alguns domingos
+      const domingos = [];
+      for (let d = 1; d <= 31; d++) {
+        const date = new Date(year, month, d);
+        if (date.getDay() === 0) {
+          domingos.push(d);
+        }
+      }
+
       domingos.forEach((day, idx) => {
-        const d = new Date(year, month, day);
-        if (d.getDay() === 0) {
-          const key = dateKey(year, month, day);
-          if (!scaleData[key]) {
-            scaleData[key] = {
-              data: `${day}/${month+1}/${year}`,
-              canticos: `Cânticos: Hinário 123, 456`,
-              sonoplastia: `Sonoplastia: Equipe Domingos (Fábio)`,
-              pregador: `Pregador: ${pregadores[(idx+2) % pregadores.length]}`,
-              recepcao: `Recepção: ${recepcao[(idx+1) % recepcao.length]}`,
-              diaconos: `Diáconos: ${diaconos[(idx+3) % diaconos.length]}`,
-              escola_sabatina: `Escola Sabatina: Classe Unificada – ${escolaSab[idx % escolaSab.length]}`,
-              adoracao_infantil: `Adoração Infantil: ${adoracaoInf[(idx+1) % adoracaoInf.length]}`
-            };
-          }
+        const key = dateKey(year, month, day);
+        if (!data[key]) {
+          data[key] = {
+            data: `${day}/${month+1}/${year}`,
+            canticos: `Cânticos: Hinário 123, 456`,
+            sonoplastia: `Sonoplastia: Equipe Domingos (Fábio)`,
+            pregador: `Pregador: ${pregadores[(idx+2) % pregadores.length]}`,
+            recepcao: `Recepção: ${recepcao[(idx+1) % recepcao.length]}`,
+            diaconos: `Diáconos: ${diaconos[(idx+3) % diaconos.length]}`,
+            escola_sabatina: `Escola Sabatina: Classe Unificada – ${escolaSab[idx % escolaSab.length]}`,
+            adoracao_infantil: `Adoração Infantil: ${adoracaoInf[(idx+1) % adoracaoInf.length]}`
+          };
         }
       });
 
-      saveScaleData(scaleData);
+      return data;
     }
 
-    // Função auxiliar para gerar uma data string YYYY-MM-DD
-    function dateKey(year, month, day) {
-      return `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    // --- Atualizar status de sincronização ---
+    function updateSyncStatus(status) {
+      const statusEl = document.getElementById('syncStatus');
+      if (!statusEl) return;
+      
+      if (status === 'online') {
+        statusEl.textContent = '✅ Sincronizado';
+        statusEl.className = 'sync-status online';
+      } else if (status === 'offline') {
+        statusEl.textContent = '⚠️ Offline - Dados locais';
+        statusEl.className = 'sync-status offline';
+      } else if (status === 'loading') {
+        statusEl.textContent = '🔄 Sincronizando...';
+        statusEl.className = 'sync-status';
+      }
     }
+
+    // --- DADOS DE ESCALA ---
+    let scaleData = {};
 
     // --- estado da aplicação ---
     let currentDate = new Date();
@@ -516,6 +591,10 @@
     const goTodayBtn = document.getElementById('goTodayBtn');
 
     const monthNames = ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+
+    function dateKey(year, month, day) {
+      return `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+    }
 
     // --- renderização do calendário ---
     function renderCalendar() {
@@ -693,11 +772,43 @@
       }
     });
 
-    // Inicializa
-    const now = new Date();
-    currentYear = now.getFullYear();
-    currentMonth = now.getMonth();
-    renderCalendar();
+    // --- Inicialização ---
+    async function initApp() {
+      // Tenta carregar do cache local primeiro
+      const cached = localStorage.getItem('escala_cache');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          if (Object.keys(parsed).length > 0) {
+            scaleData = parsed;
+            renderCalendar();
+          }
+        } catch (e) {}
+      }
+
+      // Carrega do servidor
+      const loadedData = await loadScaleData();
+      if (loadedData && Object.keys(loadedData).length > 0) {
+        scaleData = loadedData;
+        renderCalendar();
+      } else if (Object.keys(scaleData).length === 0) {
+        // Se não tem dados, gera exemplo
+        scaleData = generateExampleDataObject();
+        renderCalendar();
+      }
+    }
+
+    // Sincronização automática a cada 15 segundos
+    setInterval(async () => {
+      const newData = await loadScaleData();
+      if (newData && Object.keys(newData).length > 0) {
+        scaleData = newData;
+        renderCalendar();
+      }
+    }, 15000);
+
+    // Inicia
+    initApp();
 
   })();
 </script>
