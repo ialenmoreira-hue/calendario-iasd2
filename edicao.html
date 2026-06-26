@@ -277,6 +277,27 @@
       opacity: 0.4;
     }
 
+    .sync-status {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: rgba(0, 0, 0, 0.7);
+      color: white;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.75rem;
+      z-index: 100;
+      backdrop-filter: blur(4px);
+    }
+
+    .sync-status.online {
+      background: rgba(29, 124, 62, 0.8);
+    }
+
+    .sync-status.offline {
+      background: rgba(192, 57, 43, 0.8);
+    }
+
     .modal-overlay {
       position: fixed;
       top: 0; left: 0; width: 100%; height: 100%;
@@ -588,6 +609,7 @@
       .week-header { font-size: 0.6rem; }
       .password-box { padding: 2rem 1.5rem; }
       .lock-status { font-size: 0.7rem; padding: 0.2rem 0.8rem; }
+      .sync-status { font-size: 0.6rem; padding: 4px 10px; top: 10px; right: 10px; }
     }
   </style>
 </head>
@@ -625,6 +647,9 @@
     <span id="editHint" style="opacity:0.6;">🔒 Edição bloqueada</span>
   </div>
 </div>
+
+<!-- Sync Status -->
+<div class="sync-status" id="syncStatus">🔄 Sincronizando...</div>
 
 <!-- Modal de edição -->
 <div class="modal-overlay" id="modalOverlay">
@@ -693,36 +718,111 @@
 
 <script>
   (function() {
-    // --- CONFIGURAÇÃO ---
-    const SENHA_ADMIN = 'admin123'; // Altere esta senha conforme desejado
-    const STORAGE_KEY = 'escala_ministerial_data';
+    // --- CONFIGURAÇÃO JSONBIN.IO ---
+    // Substitua com seus dados do JsonBin.io
+    const JSONBIN_BIN_ID = '6a3e609ada38895dfe0242c1'; // Ex: 5f8d9e7a...
+    const JSONBIN_API_KEY = '$2a$10$qXgNY/.TS8T2NjRn/nKDkOksF3ahIm6.wzxa8gokjUOO/5xmqWD9e'; // Ex: $2a$10$...
+    const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${JSONBIN_BIN_ID}`;
 
-    // --- Funções de persistência ---
-    function loadScaleData() {
+    // --- CONFIGURAÇÃO ---
+    const SENHA_ADMIN = 'admin123'; // Altere esta senha
+
+    // --- Funções de persistência JsonBin.io ---
+    async function loadScaleData() {
       try {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (stored) {
-          return JSON.parse(stored);
+        updateSyncStatus('loading');
+        const response = await fetch(`${JSONBIN_URL}/latest`, {
+          headers: {
+            'X-Master-Key': JSONBIN_API_KEY
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          updateSyncStatus('online');
+          return data.record || {};
+        } else if (response.status === 404) {
+          // Bin não encontrado, criar novo
+          updateSyncStatus('online');
+          return {};
+        } else {
+          throw new Error('Erro ao carregar dados');
         }
       } catch (e) {
         console.error('Erro ao carregar dados:', e);
+        updateSyncStatus('offline');
+        // Fallback para localStorage
+        const localData = localStorage.getItem('escala_fallback');
+        if (localData) {
+          return JSON.parse(localData);
+        }
+        return null;
       }
-      return null;
     }
 
-    function saveScaleData(data) {
+    async function saveScaleData(data) {
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        updateSyncStatus('loading');
+        const response = await fetch(JSONBIN_URL, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Master-Key': JSONBIN_API_KEY
+          },
+          body: JSON.stringify(data)
+        });
+
+        if (response.ok) {
+          updateSyncStatus('online');
+          // Salva localmente como fallback
+          localStorage.setItem('escala_fallback', JSON.stringify(data));
+          return true;
+        } else {
+          throw new Error('Erro ao salvar no JsonBin');
+        }
       } catch (e) {
         console.error('Erro ao salvar dados:', e);
+        updateSyncStatus('offline');
+        // Salva localmente como fallback
+        localStorage.setItem('escala_fallback', JSON.stringify(data));
+        showToast('⚠️ Dados salvos localmente. Não foi possível sincronizar com a nuvem.');
+        return false;
+      }
+    }
+
+    // --- Atualizar status de sincronização ---
+    function updateSyncStatus(status) {
+      const statusEl = document.getElementById('syncStatus');
+      if (status === 'online') {
+        statusEl.textContent = '✅ Sincronizado';
+        statusEl.className = 'sync-status online';
+      } else if (status === 'offline') {
+        statusEl.textContent = '⚠️ Offline - Dados locais';
+        statusEl.className = 'sync-status offline';
+      } else if (status === 'loading') {
+        statusEl.textContent = '🔄 Sincronizando...';
+        statusEl.className = 'sync-status';
       }
     }
 
     // --- DADOS DE ESCALA ---
-    let scaleData = loadScaleData();
+    let scaleData = {};
 
-    // Se não houver dados salvos, gera os dados de exemplo
-    if (!scaleData || Object.keys(scaleData).length === 0) {
+    // Função para carregar dados inicialmente
+    async function initScaleData() {
+      const loadedData = await loadScaleData();
+      if (loadedData && Object.keys(loadedData).length > 0) {
+        scaleData = loadedData;
+        return true;
+      } else {
+        // Se não houver dados, cria dados de exemplo
+        generateExampleData();
+        await saveScaleData(scaleData);
+        return false;
+      }
+    }
+
+    function generateExampleData() {
       scaleData = {};
       const now = new Date();
       const year = now.getFullYear();
@@ -732,7 +832,15 @@
         return `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
       }
 
-      const sábados = [5, 12, 19, 26];
+      // Encontra os sábados do mês
+      const sábados = [];
+      for (let d = 1; d <= 31; d++) {
+        const date = new Date(year, month, d);
+        if (date.getDay() === 6) { // Sábado
+          sábados.push(d);
+        }
+      }
+
       const pregadores = ['Pr. Carlos Silva', 'Pr. Ana Lúcia', 'Pr. Roberto Mendes', 'Pr. Fernanda Costa'];
       const recepcao = ['Marcos e Lúcia', 'João e Marta', 'André e Paula', 'Sandra e Cláudio'];
       const diaconos = ['Diác. Ronaldo', 'Diác. Beatriz', 'Diác. Maurício', 'Diác. Elaine'];
@@ -753,27 +861,30 @@
         };
       });
 
-      const domingos = [1, 8, 15, 22, 29];
+      // Adiciona alguns domingos também
+      const domingos = [];
+      for (let d = 1; d <= 31; d++) {
+        const date = new Date(year, month, d);
+        if (date.getDay() === 0) { // Domingo
+          domingos.push(d);
+        }
+      }
+
       domingos.forEach((day, idx) => {
-        const d = new Date(year, month, day);
-        if (d.getDay() === 0) {
-          const key = dateKey(year, month, day);
-          if (!scaleData[key]) {
-            scaleData[key] = {
-              data: `${day}/${month+1}/${year}`,
-              canticos: `Cânticos: Hinário 123, 456`,
-              sonoplastia: `Sonoplastia: Equipe Domingos (Fábio)`,
-              pregador: `Pregador: ${pregadores[(idx+2) % pregadores.length]}`,
-              recepcao: `Recepção: ${recepcao[(idx+1) % recepcao.length]}`,
-              diaconos: `Diáconos: ${diaconos[(idx+3) % diaconos.length]}`,
-              escola_sabatina: `Escola Sabatina: Classe Unificada – ${escolaSab[idx % escolaSab.length]}`,
-              adoracao_infantil: `Adoração Infantil: ${adoracaoInf[(idx+1) % adoracaoInf.length]}`
-            };
-          }
+        const key = dateKey(year, month, day);
+        if (!scaleData[key]) {
+          scaleData[key] = {
+            data: `${day}/${month+1}/${year}`,
+            canticos: `Cânticos: Hinário 123, 456`,
+            sonoplastia: `Sonoplastia: Equipe Domingos (Fábio)`,
+            pregador: `Pregador: ${pregadores[(idx+2) % pregadores.length]}`,
+            recepcao: `Recepção: ${recepcao[(idx+1) % recepcao.length]}`,
+            diaconos: `Diáconos: ${diaconos[(idx+3) % diaconos.length]}`,
+            escola_sabatina: `Escola Sabatina: Classe Unificada – ${escolaSab[idx % escolaSab.length]}`,
+            adoracao_infantil: `Adoração Infantil: ${adoracaoInf[(idx+1) % adoracaoInf.length]}`
+          };
         }
       });
-
-      saveScaleData(scaleData);
     }
 
     function dateKey(year, month, day) {
@@ -831,7 +942,7 @@
       clearTimeout(toastTimer);
       toastTimer = setTimeout(() => {
         toast.classList.remove('show');
-      }, 2500);
+      }, 3000);
     }
 
     // --- Atualizar status de bloqueio ---
@@ -985,7 +1096,7 @@
     }
 
     // --- Salvar escala ---
-    function saveScale(e) {
+    async function saveScale(e) {
       e.preventDefault();
       if (!currentEditingKey) {
         showToast('Erro: nenhum dia selecionado');
@@ -1010,24 +1121,32 @@
       const hasContent = Object.values(newScale).some(val => val !== '' && val !== dataStr);
       if (!hasContent) {
         delete scaleData[key];
-        showToast('🗑️ Escala removida');
       } else {
         scaleData[key] = newScale;
-        showToast('✅ Escala salva com sucesso!');
       }
 
-      saveScaleData(scaleData);
-      closeModal();
-      renderCalendar();
+      // Salva no JsonBin.io
+      const success = await saveScaleData(scaleData);
+      if (success) {
+        showToast(hasContent ? '✅ Escala salva com sucesso!' : '🗑️ Escala removida');
+        closeModal();
+        renderCalendar();
+      } else {
+        // Já tem o toast do saveScaleData
+        closeModal();
+        renderCalendar();
+      }
     }
 
     // --- Remover escala ---
-    function deleteScale() {
+    async function deleteScale() {
       if (!currentEditingKey) return;
       if (confirm(`Remover a escala do dia ${editData.value}?`)) {
         delete scaleData[currentEditingKey];
-        saveScaleData(scaleData);
-        showToast('🗑️ Escala removida');
+        const success = await saveScaleData(scaleData);
+        if (success) {
+          showToast('🗑️ Escala removida');
+        }
         closeModal();
         renderCalendar();
       }
@@ -1142,12 +1261,28 @@
     scaleForm.addEventListener('submit', saveScale);
     deleteScaleBtn.addEventListener('click', deleteScale);
 
-    // Inicializa
-    const now = new Date();
-    currentYear = now.getFullYear();
-    currentMonth = now.getMonth();
-    updateLockUI();
-    renderCalendar();
+    // --- Sincronização automática ---
+    // Recarregar dados periodicamente
+    setInterval(async () => {
+      const newData = await loadScaleData();
+      if (newData && Object.keys(newData).length > 0) {
+        scaleData = newData;
+        renderCalendar();
+      }
+    }, 15000); // Recarrega a cada 15 segundos
+
+    // --- Inicialização ---
+    async function initApp() {
+      await initScaleData();
+      const now = new Date();
+      currentYear = now.getFullYear();
+      currentMonth = now.getMonth();
+      updateLockUI();
+      renderCalendar();
+    }
+
+    // Inicia a aplicação
+    initApp();
 
   })();
 </script>
